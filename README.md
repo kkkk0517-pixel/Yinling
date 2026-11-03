@@ -93,12 +93,22 @@ npm run dev               # 默认 http://localhost:5173
 
 ---
 
-## 分支约定
+## 协作流程
 
-- `main` 受保护，只能通过 PR 合并
-- 每人开短分支：`feat/agent-order`、`feat/elder-calendar`、`fix/sla-cas`
+**`main` 受保护，不能直接 push。** 所有改动走 PR，且需要至少 1 人 approve。
+
+```
+git checkout -b feat/agent-order      # 开短分支
+# 写代码
+git commit -m "feat: 承办人工作台骨架"
+git push -u origin feat/agent-order   # 推上去
+# 在 GitHub 开 PR，等 review
+```
+
+- 分支命名：`feat/xxx`、`fix/xxx`、`docs/xxx`
 - 提交信息：`feat: xxx` / `fix: xxx` / `docs: xxx`
 - **合并前本地必须跑通**，main 要随时能跑
+- 有接口/表结构变更，同一个 PR 里把 `docs/` 对应的那份一起改
 
 ---
 
