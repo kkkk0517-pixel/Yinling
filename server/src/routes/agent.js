@@ -11,6 +11,7 @@ const { query, queryOne, execute } = require('../db');
 const { ok, fail } = require('../utils/response');
 const { requireAuth, requireFunction } = require('../middleware/auth');
 const { formatDateTime, diffMinutes, secondsUntil } = require('../utils/time');
+const { getParam } = require('../utils/param');
 
 const router = express.Router();
 
@@ -313,6 +314,12 @@ router.post('/service-orders/:id/complete', async (req, res, next) => {
 
     const amount = req.body.amount === undefined || req.body.amount === null ? null : Number(req.body.amount);
     if (amount !== null && (Number.isNaN(amount) || amount < 0)) return fail(res, 422, 'amount 不合法');
+
+    // 金额上限由 param.bill_limit 控制，防止手滑多打一个 0
+    if (amount !== null && amount > 0) {
+      const limit = Number(await getParam('bill_limit', 500));
+      if (amount > limit) return fail(res, 422, `单笔金额不能超过 ${limit} 元`);
+    }
 
     await execute(
       `UPDATE service_order SET status = 'done', done_at = NOW(), amount = ? WHERE id = ?`,

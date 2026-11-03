@@ -190,6 +190,10 @@ router.post('/requests', async (req, res, next) => {
     const clientRequestId = String(req.body.clientRequestId || '').trim();
     if (!clientRequestId) return fail(res, 422, 'clientRequestId 必填');
 
+    // content_text 是 VARCHAR(500)，超长直接拒绝，别让 MySQL 抛 500
+    const contentText = req.body.contentText ? String(req.body.contentText) : null;
+    if (contentText && contentText.length > 500) return fail(res, 422, '内容不能超过 500 字');
+
     // 幂等：同一 clientRequestId 直接返回已有单
     const dup = await queryOne(
       'SELECT id, created_at AS createdAt FROM service_order WHERE client_request_id = ?',
@@ -232,7 +236,7 @@ router.post('/requests', async (req, res, next) => {
         keyType,
         req.body.audioFileId || null,
         Number(req.body.duration || 0) || null,
-        req.body.contentText || null,
+        contentText,
         elder.addr,
         clientRequestId,
       ]

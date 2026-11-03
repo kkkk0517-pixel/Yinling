@@ -6,14 +6,19 @@ require('dotenv').config();
 const DEV_SECRET = 'dev-only-change-me';
 
 const jwtSecret = process.env.JWT_SECRET || DEV_SECRET;
+const env = process.env.NODE_ENV || 'development';
 
 if (jwtSecret === DEV_SECRET) {
-  // 不阻塞启动，但必须让人看见
+  if (env === 'production') {
+    // 生产环境用默认密钥等于没有鉴权，直接拒绝启动
+    console.error('[fatal] 生产环境必须设置 JWT_SECRET（node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"）');
+    process.exit(1);
+  }
   console.warn('[warn] JWT_SECRET 未设置，正在使用开发默认值。部署前必须改。');
 }
 
 module.exports = {
-  env: process.env.NODE_ENV || 'development',
+  env,
   port: Number(process.env.PORT || 3000),
 
   db: {
@@ -32,5 +37,5 @@ module.exports = {
 
   // 开发环境短信验证码固定值。生产必须接真实短信通道。
   devSmsCode: process.env.DEV_SMS_CODE || '123456',
-  isDev: (process.env.NODE_ENV || 'development') !== 'production',
+  isDev: env !== 'production',
 };

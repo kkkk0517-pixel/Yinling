@@ -6,7 +6,7 @@
 
 ```
 server/
-├── src/                 真后端（Express）
+├── src/                 后端（Express）
 │   ├── index.js         入口
 │   ├── app.js           中间件与路由装配
 │   ├── config.js        环境变量（只在这里读一次）
@@ -16,11 +16,17 @@ server/
 │   │   └── error.js     404 与 500 兜底
 │   ├── routes/
 │   │   ├── health.js    GET /api/health
-│   │   └── auth.js      A1 / A2 / A3
+│   │   ├── auth.js      A1–A5
+│   │   ├── elder.js     E1–E7
+│   │   ├── relation.js  R1–R9
+│   │   ├── agent.js     H1–H10
+│   │   ├── admin.js     M1–M11
+│   │   └── demo.js      D1–D3
 │   └── utils/
 │       ├── jwt.js       签发与校验
-│       └── response.js  ok / fail
-├── mock/                临时 mock，A/B 联调用，真后端接上后删除
+│       ├── param.js     社区参数读写
+│       ├── response.js  ok / fail
+│       └── time.js      时间格式化
 └── .env.example
 ```
 
@@ -34,12 +40,6 @@ npm run dev               # http://localhost:3000
 ```
 
 数据库还没建？先跑 `sql/schema.sql` 和 `sql/seed.sql`（见仓库根 README）。
-
-**只想联调前端**，不想装数据库：
-
-```bash
-npm run mock              # 45 个接口全可用，零依赖
-```
 
 ## 已实现
 

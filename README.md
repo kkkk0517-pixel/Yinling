@@ -64,22 +64,14 @@ mysql -u root -p yinling < sql/seed.sql
 
 ### 3. 启动后端
 
-**真后端还没写，先用 mock**（零依赖，不用 `npm install`）：
-
-```bash
-node server/mock/index.js    # http://localhost:3000
-```
-
-45 个接口全部可用，说明见 `server/mock/README.md`。
-
-真后端好了之后：
-
 ```bash
 cd server
 npm install
-cp .env.example .env      # 填数据库密码
+cp .env.example .env      # 填数据库密码，改 JWT_SECRET
 npm run dev               # 默认 http://localhost:3000
 ```
+
+确认活着：`curl http://localhost:3000/api/health` 应返回 `{"code":0,...,"db":"up"}`。
 
 ### 4. 启动管理端
 

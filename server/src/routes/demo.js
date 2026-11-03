@@ -30,6 +30,10 @@ router.post('/reset', async (req, res, next) => {
   const startedAt = Date.now();
   let conn;
   try {
+    // 生产环境禁止清库
+    if (!config.isDev) {
+      return fail(res, 403, '生产环境不允许重置数据');
+    }
     if (!fs.existsSync(SEED_PATH)) {
       return fail(res, 500, '找不到 sql/seed.sql，无法重置');
     }
