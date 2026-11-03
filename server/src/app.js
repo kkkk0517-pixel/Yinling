@@ -6,7 +6,11 @@ const cors = require('cors');
 
 const healthRoutes = require('./routes/health');
 const authRoutes = require('./routes/auth');
+const elderRoutes = require('./routes/elder');
+const relationRoutes = require('./routes/relation');
+const agentRoutes = require('./routes/agent');
 const adminRoutes = require('./routes/admin');
+const demoRoutes = require('./routes/demo');
 const { notFound, errorHandler } = require('./middleware/error');
 
 const app = express();
@@ -28,7 +32,11 @@ app.use((req, res, next) => {
 
 app.use('/api', healthRoutes);
 app.use('/api/auth', authRoutes);
+app.use('/api/elder', elderRoutes);
+app.use('/api/relation', relationRoutes);
+app.use('/api/agent', agentRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/demo', demoRoutes);
 
 // 兜底
 app.use(notFound);

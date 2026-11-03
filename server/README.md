@@ -43,14 +43,37 @@ npm run mock              # 45 个接口全可用，零依赖
 
 ## 已实现
 
-| 编号 | 接口 | 状态 |
-|---|---|---|
-| A1 | `POST /api/auth/sms-code` | ✅ 开发环境固定返回 `123456` |
-| A2 | `POST /api/auth/login` | ✅ 查库 + 签 JWT，返回 `person / functions / elders` |
-| A3 | `GET /api/auth/me` | ✅ 需登录 |
-| — | `GET /api/health` | ✅ 带数据库连通性检查 |
+**45 个 HTTP 接口全部落地**，全部连真库。
 
-`A4` 邀请码、`A5` 绑定归 `#3`，依赖 `invite_code` 的写入逻辑。
+| 组 | 文件 | 数量 | 编号 |
+|---|---|---|---|
+| 认证与绑定 | `routes/auth.js` | 5 | A1–A5 |
+| 老人端 | `routes/elder.js` | 7 | E1–E7 |
+| 关系人端 | `routes/relation.js` | 9 | R1–R9 |
+| 处置端 | `routes/agent.js` | 10 | H1–H10 |
+| 管理端 | `routes/admin.js` | 11 | M1–M11 |
+| 调试与演示 | `routes/demo.js` | 3 | D1–D3 |
+| 健康检查 | `routes/health.js` | 1 | `GET /api/health` |
+
+定时任务 T1–T4 不是 HTTP，归 `#12`。
+
+### 几条已经落地的硬规则
+
+- **只有主责回执才停计时**（R3）：知会人点了不清 `sla_deadline`
+- **耗时和无效核查由服务端算**（H4）：`duration_min` 取第一条 action 事件到现在，`is_invalid_check` 由 `result_code` 判定，前端传不了
+- **promise 按 param 生成**（E5）：改时限后话术自动变
+- **30 秒内同类单合并**（E5）：`merge_window_sec` 控制
+- **M6 整体覆盖式保存**：先清后建，避免「删了主责没删关系」的脏数据
+- **M8 只改白名单 key**：不在 `WRITABLE_KEYS` 里的一律 422
+- **D1 真读 `sql/seed.sql`**：不是硬编码一份假数据
+
+### 尚未实现
+
+| 项 | 归属 |
+|---|---|
+| 录音文件真实上传（E4 目前只登记元数据） | `#13` |
+| L1–L4 引擎、定时任务 | `#8`–`#12` |
+| SLA 自动升级（R3 只做「停计时」，升级靠 T2） | `#11` `#12` |
 
 ## 约定
 

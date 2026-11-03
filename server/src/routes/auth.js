@@ -8,10 +8,11 @@
  */
 const express = require('express');
 const config = require('../config');
-const { query, queryOne } = require('../db');
+const { query, queryOne, execute } = require('../db');
 const { sign } = require('../utils/jwt');
 const { ok, fail } = require('../utils/response');
 const { requireAuth } = require('../middleware/auth');
+const { formatDateTime } = require('../utils/time');
 
 const router = express.Router();
 
@@ -143,6 +144,61 @@ router.get('/me', requireAuth, async (req, res, next) => {
       elders,
       roleLabels: { [person.roleLabel || '']: person.roleLabel },
     });
+  } catch (e) {
+    return next(e);
+  }
+});
+
+// ---------------- A4 POST /auth/invite ----------------
+router.post('/invite', requireAuth, async (req, res, next) => {
+  try {
+    const elderId = Number(req.body.elderId);
+    if (!elderId) return fail(res, 422, 'elderId 必填');
+
+    const elder = await queryOne('SELECT id, name FROM elder WHERE id = ? AND status = ?', [elderId, 'active']);
+    if (!elder) return fail(res, 404, '老人档案不存在或已停用');
+
+    // 重复生成时旧码作废
+    await execute('UPDATE invite_code SET used_at = NOW() WHERE elder_id = ? AND used_at IS NULL', [elderId]);
+
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const expiresAt = new Date(Date.now() + 7 * 24 * 3600 * 1000);
+    await execute(
+      'INSERT INTO invite_code (code, elder_id, created_by, expires_at) VALUES (?, ?, ?, ?)',
+      [code, elderId, req.user.personId, expiresAt]
+    );
+
+    return ok(res, { code, expiresAt: formatDateTime(expiresAt) });
+  } catch (e) {
+    return next(e);
+  }
+});
+
+// ---------------- A5 POST /auth/bind ----------------
+router.post('/bind', requireAuth, async (req, res, next) => {
+  try {
+    const code = String(req.body.code || '').trim();
+    if (!/^\d{6}$/.test(code)) return fail(res, 422, '邀请码应为 6 位数字');
+
+    const row = await queryOne(
+      `SELECT ic.id, ic.elder_id AS elderId, ic.expires_at AS expiresAt, ic.used_at AS usedAt,
+              e.name AS elderName
+         FROM invite_code ic
+         JOIN elder e ON e.id = ic.elder_id
+        WHERE ic.code = ?`,
+      [code]
+    );
+
+    if (!row) return fail(res, 404, '邀请码不存在');
+    if (row.usedAt) return fail(res, 409, '邀请码已被使用');
+    if (new Date(row.expiresAt) < new Date()) return fail(res, 409, '邀请码已过期');
+
+    await execute(
+      'UPDATE invite_code SET used_at = NOW(), used_by = ? WHERE id = ?',
+      [req.user.personId, row.id]
+    );
+
+    return ok(res, { elderId: row.elderId, elderName: row.elderName });
   } catch (e) {
     return next(e);
   }
