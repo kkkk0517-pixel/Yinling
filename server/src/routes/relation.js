@@ -9,7 +9,9 @@ const express = require('express');
 const { pool, query, queryOne, execute } = require('../db');
 const { ok, fail } = require('../utils/response');
 const { requireAuth, requireFunction } = require('../middleware/auth');
-const { now, formatDateTime, diffMinutes } = require('../utils/time');
+const { now, formatDateTime, diffMinutes, secondsUntil } = require('../utils/time');
+const { ackNotification } = require('../services/verification');
+const { listEvidenceRequests, ackEvidence, requireRelation } = require('../services/evidence-requests');
 
 const router = express.Router();
 
@@ -38,8 +40,9 @@ async function myRelation(personId, elderId) {
 // ---------------- R1 GET /relation/home ----------------
 router.get('/home', async (req, res, next) => {
   try {
+    await requireRelation(req.user.personId);
     const elders = await myElders(req.user.personId);
-    if (!elders.length) return ok(res, { elders: [], mergedNotification: null, bills: [] });
+    if (!elders.length) return ok(res, { elders: [], mergedNotification: null, bills: [], evidenceRequests: [] });
 
     // 每位老人今天的状态一句话
     const withStatus = [];
@@ -56,7 +59,7 @@ router.get('/home', async (req, res, next) => {
 
     // 最新一条待回执通知（多老人 30 分钟内合并成一条，这里取最新即可）
     const noti = await queryOne(
-      `SELECT n.id, n.order_id AS orderId, n.is_accountable AS isAccountable,
+      `SELECT n.id, n.order_id AS orderId, vo.alert_id AS alertId, n.is_accountable AS isAccountable,
               n.sent_at AS sentAt, e.id AS elderId, e.name AS elderName, vo.sla_deadline AS slaDeadline
          FROM notification n
          JOIN verify_order vo ON vo.id = n.order_id AND n.order_type = 'verify'
@@ -69,8 +72,8 @@ router.get('/home', async (req, res, next) => {
     let mergedNotification = null;
     if (noti) {
       const alert = await queryOne(
-        `SELECT signal_snapshot AS snapshot FROM alert WHERE elder_id = ? ORDER BY created_at DESC LIMIT 1`,
-        [noti.elderId]
+        `SELECT signal_snapshot AS snapshot FROM alert WHERE id = ? AND elder_id = ?`,
+        [noti.alertId, noti.elderId]
       );
       const snapshot = parseJson(alert && alert.snapshot, []);
       const firstNote = snapshot.length ? snapshot[0].note : '今天有点不一样';
@@ -92,7 +95,7 @@ router.get('/home', async (req, res, next) => {
       [req.user.personId]
     );
 
-    return ok(res, { elders: withStatus, mergedNotification, bills });
+    return ok(res, { elders: withStatus, mergedNotification, bills, evidenceRequests: await listEvidenceRequests(req.user.personId) });
   } catch (e) {
     return next(e);
   }
@@ -101,6 +104,7 @@ router.get('/home', async (req, res, next) => {
 // ---------------- R2 GET /relation/notifications/:id ----------------
 router.get('/notifications/:id', async (req, res, next) => {
   try {
+    await requireRelation(req.user.personId);
     const noti = await queryOne(
       `SELECT n.id, n.order_id AS orderId, n.person_id AS personId, n.is_accountable AS isAccountable,
               n.sent_at AS sentAt, n.ack_at AS ackAt
@@ -111,7 +115,7 @@ router.get('/notifications/:id', async (req, res, next) => {
     if (noti.personId !== req.user.personId) return fail(res, 403, '无权查看他人的通知');
 
     const order = await queryOne(
-      `SELECT id, elder_id AS elderId, current_layer AS currentLayer, status, sla_deadline AS slaDeadline
+      `SELECT id, elder_id AS elderId, alert_id AS alertId, current_layer AS currentLayer, status, sla_deadline AS slaDeadline
          FROM verify_order WHERE id = ?`,
       [noti.orderId]
     );
@@ -123,8 +127,8 @@ router.get('/notifications/:id', async (req, res, next) => {
     );
 
     const alert = await queryOne(
-      'SELECT d_score AS d, q_score AS q, cell, signal_snapshot AS snapshot FROM alert WHERE elder_id = ? ORDER BY created_at DESC LIMIT 1',
-      [order.elderId]
+      'SELECT d_score AS d, q_score AS q, cell, signal_snapshot AS snapshot FROM alert WHERE id = ? AND elder_id = ?',
+      [order.alertId, order.elderId]
     );
     const snapshot = parseJson(alert && alert.snapshot, []);
     const reasons = snapshot.map((s) => s.note || s.signal);
@@ -153,7 +157,7 @@ router.get('/notifications/:id', async (req, res, next) => {
         ? { at: formatDateTime(lastService.at), content: lastService.content }
         : null,
       isAccountable: !!noti.isAccountable,
-      slaLeftSec: order.slaDeadline ? Math.round((new Date(order.slaDeadline).getTime() - Date.now()) / 1000) : null,
+      slaLeftSec: order.slaDeadline ? secondsUntil(order.slaDeadline) : null,
       buttons,
     });
   } catch (e) {
@@ -163,42 +167,16 @@ router.get('/notifications/:id', async (req, res, next) => {
 
 // ---------------- R3 POST /relation/notifications/:id/ack ----------------
 router.post('/notifications/:id/ack', async (req, res, next) => {
-  try {
-    const noti = await queryOne(
-      `SELECT id, order_id AS orderId, person_id AS personId,
-              is_accountable AS isAccountable, ack_at AS ackAt
-         FROM notification WHERE id = ? AND order_type = 'verify'`,
-      [Number(req.params.id)]
-    );
-    if (!noti) return fail(res, 404, '通知不存在');
-    if (noti.personId !== req.user.personId) return fail(res, 403, '无权操作他人的通知');
-    if (noti.ackAt) return ok(res, { ok: true, escalated: false, duplicated: true });
+  try { return ok(res, await ackNotification(Number(req.params.id), req.user.personId, String(req.body.result || ''))); }
+  catch (error) { return next(error); }
+});
 
-    const result = String(req.body.result || '');
-    const allowed = ['ok_visited', 'ok_called', 'unreachable'];
-    if (!allowed.includes(result)) return fail(res, 422, 'result 取值不合法');
-
-    // 1. 写回执
-    await execute(
-      'UPDATE notification SET ack_at = NOW(), ack_result = ? WHERE id = ?',
-      [result, noti.id]
-    );
-
-    // 2. 只有主责才停计时
-    if (noti.isAccountable) {
-      await execute('UPDATE verify_order SET sla_deadline = NULL WHERE id = ?', [noti.orderId]);
-    }
-
-    // 3. 事件流
-    await execute(
-      'INSERT INTO order_event (order_type, order_id, actor_id, action, payload) VALUES (?, ?, ?, ?, ?)',
-      ['verify', noti.orderId, req.user.personId, 'ack', JSON.stringify({ result, accountable: !!noti.isAccountable })]
-    );
-
-    return ok(res, { ok: true, escalated: false });
-  } catch (e) {
-    return next(e);
-  }
+// ---------------- R10 POST /relation/evidence-requests/:id/ack ----------------
+router.post('/evidence-requests/:id/ack', async (req, res, next) => {
+  const alertId = Number(req.params.id);
+  if (!Number.isSafeInteger(alertId) || alertId < 1) return fail(res, 422, '请求编号不合法');
+  try { return ok(res, await ackEvidence(alertId, req.user.personId, req.body)); }
+  catch (error) { return next(error); }
 });
 
 // ---------------- R4 GET /relation/elders/:id/brief ----------------

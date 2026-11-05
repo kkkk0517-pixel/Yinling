@@ -13,7 +13,9 @@ const adminRoutes = require('./routes/admin');
 const demoRoutes = require('./routes/demo');
 const { notFound, errorHandler } = require('./middleware/error');
 
+function createApp({ jobRuntime } = {}) {
 const app = express();
+if (jobRuntime) app.locals.jobRuntime = jobRuntime;
 
 // 前端跑在 5173，后端 3000，必须开 CORS
 app.use(cors());
@@ -31,6 +33,8 @@ app.use((req, res, next) => {
 });
 
 app.use('/api', healthRoutes);
+// 业务时钟就绪独立于慢日批；备用/停用实例在每次请求前跟随持久化基准。
+if (jobRuntime) app.use('/api', (req, res, next) => jobRuntime.ensureClock().then(() => next(), next));
 app.use('/api/auth', authRoutes);
 app.use('/api/elder', elderRoutes);
 app.use('/api/relation', relationRoutes);
@@ -42,4 +46,8 @@ app.use('/api/demo', demoRoutes);
 app.use(notFound);
 app.use(errorHandler);
 
+return app;
+}
+const app = createApp();
+app.createApp = createApp;
 module.exports = app;

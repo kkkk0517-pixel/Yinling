@@ -45,4 +45,9 @@ async function ping() {
   }
 }
 
-module.exports = { pool, query, queryOne, execute, ping };
+/** 长期所有权/维护会话不占用业务池，防止小连接池被租锁耗尽。 */
+async function createJobConnection(options = {}) {
+  const { connectionLimit, ...connection } = config.db;
+  return mysql.createConnection({ ...connection, dateStrings: true, timezone: '+08:00', ...options });
+}
+module.exports = { pool, query, queryOne, execute, ping, createJobConnection };

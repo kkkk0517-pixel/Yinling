@@ -8,11 +8,15 @@
  *   - 30 秒内同 elderId + keyType 有未完成单 → 返回已有单
  */
 const express = require('express');
+const { randomUUID } = require('crypto');
 const { query, queryOne, execute } = require('../db');
 const { ok, fail } = require('../utils/response');
 const { requireAuth, requireFunction } = require('../middleware/auth');
 const { now, plusMin, formatDateTime, todayStart } = require('../utils/time');
 const { getParam } = require('../utils/param');
+const { recordSignal } = require('../engine/l1');
+const { signalDay } = require('../utils/signal-day');
+const { createEmergency } = require('../services/routing');
 
 const router = express.Router();
 
@@ -37,12 +41,14 @@ function almanac(dateStr) {
 }
 
 /** 连续确认天数（从今天往前数） */
-function streakOf(rows) {
+function streakOf(rows, today) {
+  const confirmed = new Set(rows.filter(r => r.confirmed).map(r => String(r.statDate).slice(0, 10)));
+  const previous = date => new Date(new Date(date + 'T00:00:00Z').getTime() - 86400000).toISOString().slice(0, 10);
+  let date = confirmed.has(today) ? today : previous(today);
   let n = 0;
-  for (const r of rows) {
-    if (r.calendar_confirmed) n += 1;
-    else if (n === 0) continue; // 今天还没确认时，从昨天开始算
-    else break;
+  while (confirmed.has(date)) {
+    n += 1;
+    date = previous(date);
   }
   return n;
 }
@@ -53,14 +59,15 @@ router.get('/home', async (req, res, next) => {
     const elder = await myElder(req.user.personId);
     if (!elder) return fail(res, 404, '未找到您的档案，请联系社区');
 
+    const signal = await recordSignal({ elderId: elder.id, type: 'app_open', clientRequestId: randomUUID() });
     const daily = await query(
       `SELECT stat_date AS statDate, calendar_confirmed AS confirmed
-         FROM signal_daily WHERE elder_id = ? ORDER BY stat_date DESC LIMIT 60`,
-      [elder.id]
+         FROM signal_daily WHERE elder_id = ? AND stat_date <= ? AND calendar_confirmed = 1 ORDER BY stat_date DESC`,
+      [elder.id, signal.statDate]
     );
-    const today = daily.find((d) => String(d.statDate).slice(0, 10) === todayStart().slice(0, 10));
+    const today = daily.find((d) => String(d.statDate).slice(0, 10) === signal.statDate);
     const todayConfirmed = !!(today && today.confirmed);
-    const { yi, ji } = almanac(todayStart().slice(0, 10));
+    const { yi, ji } = almanac(signal.statDate);
 
     const lastService = await queryOne(
       `SELECT done_at AS at, content_text AS content
@@ -82,7 +89,7 @@ router.get('/home', async (req, res, next) => {
 
     return ok(res, {
       todayConfirmed,
-      calendar: { yi, ji, totalPages: daily.length || 1, streak: streakOf(daily) },
+      calendar: { yi, ji, totalPages: daily.length, streak: streakOf(daily, signal.statDate) },
       recentVisit: lastService
         ? { at: formatDateTime(lastService.at), note: lastService.content || '社区来做过服务' }
         : null,
@@ -103,37 +110,23 @@ router.post('/calendar/confirm', async (req, res, next) => {
     if (!elder) return fail(res, 404, '未找到您的档案');
 
     const clientRequestId = String(req.body.clientRequestId || '').trim();
-    const today = todayStart().slice(0, 10);
-
-    // 埋点：强信号 calendar_confirmed
-    if (clientRequestId) {
-      const dup = await queryOne('SELECT id FROM signal_event WHERE client_request_id = ?', [clientRequestId]);
-      if (!dup) {
-        await execute(
-          'INSERT INTO signal_event (elder_id, type, payload, client_request_id) VALUES (?, ?, ?, ?)',
-          [elder.id, 'calendar_confirmed', JSON.stringify({ date: today }), clientRequestId]
-        );
-      }
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(clientRequestId)) {
+      return fail(res, 422, 'clientRequestId 必须为 UUID v4');
     }
 
-    // 聚合到当天
-    await execute(
-      `INSERT INTO signal_daily (elder_id, stat_date, calendar_confirmed, app_opens, last_confirm_at)
-       VALUES (?, ?, 1, 1, NOW())
-       ON DUPLICATE KEY UPDATE calendar_confirmed = 1, app_opens = app_opens + 1, last_confirm_at = NOW()`,
+    const signal = await recordSignal({ elderId: elder.id, type: 'calendar_confirmed', clientRequestId });
+    const today = signalDay(now(), Number(await getParam('day_cut_hour', 4)));
+
+    const daily = await query(
+      `SELECT stat_date AS statDate, calendar_confirmed AS confirmed FROM signal_daily
+        WHERE elder_id = ? AND stat_date <= ? AND calendar_confirmed = 1 ORDER BY stat_date DESC`,
       [elder.id, today]
     );
 
-    const daily = await query(
-      `SELECT calendar_confirmed AS confirmed FROM signal_daily
-        WHERE elder_id = ? ORDER BY stat_date DESC LIMIT 60`,
-      [elder.id]
-    );
-
     return ok(res, {
-      confirmedAt: now(),
-      totalPages: daily.length || 1,
-      streak: streakOf(daily),
+      confirmedAt: signal.at,
+      totalPages: daily.length,
+      streak: streakOf(daily, today),
     });
   } catch (e) {
     return next(e);
@@ -265,52 +258,8 @@ async function promiseText() {
 
 // ---------------- E6 POST /elder/emergency ----------------
 router.post('/emergency', async (req, res, next) => {
-  try {
-    const elder = await myElder(req.user.personId);
-    if (!elder) return fail(res, 404, '未找到您的档案');
-
-    const clientRequestId = String(req.body.clientRequestId || '').trim();
-    if (!clientRequestId) return fail(res, 422, 'clientRequestId 必填');
-
-    const dup = await queryOne(
-      'SELECT id FROM verify_order WHERE client_request_id = ?',
-      [clientRequestId]
-    );
-    if (dup) {
-      return ok(res, { orderId: dup.id, promise: '已通知所有联系人，请稍等', duplicated: true });
-    }
-
-    // 紧急单：跳过 L3/L4，直接全链广播
-    const result = await execute(
-      `INSERT INTO verify_order (elder_id, source, current_layer, status, route_mode, sla_deadline, client_request_id)
-       VALUES (?, 'emergency', 1, 'notified', 'relation', DATE_ADD(NOW(), INTERVAL 5 MINUTE), ?)`,
-      [elder.id, clientRequestId]
-    );
-
-    const orderId = result.insertId;
-
-    // 通知全部关系人（不分层）
-    const relations = await query(
-      'SELECT id, person_id AS personId, is_accountable AS isAccountable FROM relation WHERE elder_id = ? AND status = 1',
-      [elder.id]
-    );
-    for (const r of relations) {
-      await execute(
-        `INSERT INTO notification (order_type, order_id, relation_id, person_id, is_accountable)
-         VALUES ('verify', ?, ?, ?, ?)`,
-        [orderId, r.id, r.personId, r.isAccountable]
-      );
-    }
-
-    await execute(
-      'INSERT INTO order_event (order_type, order_id, actor_id, action, payload) VALUES (?, ?, ?, ?, ?)',
-      ['verify', orderId, req.user.personId, 'broadcast', JSON.stringify({ count: relations.length })]
-    );
-
-    return ok(res, { orderId, promise: '已通知所有联系人，请稍等' });
-  } catch (e) {
-    return next(e);
-  }
+  try { return ok(res, await createEmergency(req.user.personId, req.body.clientRequestId)); }
+  catch (error) { return next(error); }
 });
 
 // ---------------- E7 POST /elder/requests/:id/cancel ----------------

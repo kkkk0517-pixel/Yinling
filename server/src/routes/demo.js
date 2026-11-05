@@ -9,14 +9,17 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const mysql = require('mysql2/promise');
+const mysql = require('mysql2');
 
 const config = require('../config');
 const { query, queryOne, execute } = require('../db');
 const { ok, fail } = require('../utils/response');
 const { requireAuth, requireFunction } = require('../middleware/auth');
 const { now } = require('../utils/time');
-const { setParam } = require('../utils/param');
+const { acquireMaintenance } = require('../services/job-store');
+const { changeScale } = require('../services/clock-control');
+const { actor } = require('../services/routing-store');
+const { businessClock } = require('../utils/business-clock');
 
 const router = express.Router();
 
@@ -29,21 +32,24 @@ const SEED_PATH = path.resolve(__dirname, '../../../sql/seed.sql');
 router.post('/reset', async (req, res, next) => {
   const startedAt = Date.now();
   let conn;
+  let maintenance;
   try {
     // 生产环境禁止清库
     if (!config.isDev) {
       return fail(res, 403, '生产环境不允许重置数据');
     }
+    if (req.app.locals.jobRuntime?.getHealth().enabled ?? config.jobs.enabled) return fail(res, 409, '请先停用调度并重启后清库');
     if (!fs.existsSync(SEED_PATH)) {
       return fail(res, 500, '找不到 sql/seed.sql，无法重置');
     }
-    const seedSql = fs.readFileSync(SEED_PATH, 'utf8');
+    const seedSql = fs.readFileSync(SEED_PATH, 'utf8').replace(/^\s*USE\s+yinling\s*;/im, 'USE '+mysql.escapeId(config.db.database)+';');
 
-    conn = await mysql.createConnection({
-      ...config.db,
-      multipleStatements: true,
-    });
+    maintenance = await acquireMaintenance();
+    conn = maintenance.connection;
+    await actor(conn, req.user.personId, ['admin']);
     await conn.query(seedSql);
+    businessClock.reset();
+    req.app.locals.jobRuntime?.clearAfterDataReset();
 
     const elderRow = await queryOne('SELECT COUNT(*) AS n FROM elder');
     const relRow = await queryOne('SELECT COUNT(*) AS n FROM relation');
@@ -57,7 +63,7 @@ router.post('/reset', async (req, res, next) => {
   } catch (e) {
     return next(e);
   } finally {
-    if (conn) await conn.end().catch(() => {});
+    if (maintenance) await maintenance.release();
   }
 });
 
@@ -129,8 +135,7 @@ router.put('/time-scale', async (req, res, next) => {
     const scale = Number(req.body.scale);
     if (![1, 10, 60].includes(scale)) return fail(res, 422, 'scale 只能是 1 / 10 / 60');
 
-    await setParam('time_scale', scale);
-    return ok(res, { ok: true, scale });
+    return ok(res, await changeScale(req.user.personId, scale, { ownerId: req.app.locals.jobRuntime?.ownerId() ?? null }));
   } catch (e) {
     return next(e);
   }

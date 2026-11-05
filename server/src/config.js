@@ -7,6 +7,13 @@ const DEV_SECRET = 'dev-only-change-me';
 
 const jwtSecret = process.env.JWT_SECRET || DEV_SECRET;
 const env = process.env.NODE_ENV || 'development';
+if(process.env.JOBS_ENABLED!==undefined&&!['true','false'].includes(process.env.JOBS_ENABLED))throw new RangeError('JOBS_ENABLED 必须为 true 或 false');
+function jobNumber(name, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
+  const raw = process.env[name] ?? fallback;
+  const value = Number(raw);
+  if (String(raw).trim() === '' || !Number.isSafeInteger(value) || value < min || value > max) throw new RangeError(name + ' 不合法');
+  return value;
+}
 
 if (jwtSecret === DEV_SECRET) {
   if (env === 'production') {
@@ -38,4 +45,12 @@ module.exports = {
   // 开发环境短信验证码固定值。生产必须接真实短信通道。
   devSmsCode: process.env.DEV_SMS_CODE || '123456',
   isDev: env !== 'production',
+  jobs: {
+    enabled: process.env.JOBS_ENABLED !== 'false',
+    pollMs: jobNumber('JOB_POLL_MS', 250),
+    retryMs: jobNumber('JOB_RETRY_MS', 30000),
+    slaSeconds: jobNumber('JOB_T2_INTERVAL_SEC', 30),
+    baselineHour: jobNumber('JOB_T3_HOUR', 3, 0, 23),
+    stratifyMinutes: jobNumber('JOB_T4_INTERVAL_MIN', 60),
+  },
 };
