@@ -11,8 +11,11 @@ const express = require('express');
 const { pool, query, queryOne, execute } = require('../db');
 const { ok, fail } = require('../utils/response');
 const { requireAuth, requireFunction } = require('../middleware/auth');
-const { formatDateTime } = require('../utils/time');
+const { formatDateTime, now } = require('../utils/time');
 const { loadParams, WRITABLE_KEYS } = require('../utils/param');
+const { listRoutingTodos } = require('../services/routing');
+const { changeScale, changeDayCut } = require('../services/clock-control');
+const { transaction, actor } = require('../services/routing-store');
 
 const router = express.Router();
 
@@ -52,25 +55,27 @@ router.get('/overview', async (req, res, next) => {
   try {
     const range = String(req.query.range || '7d');
     const days = range === '30d' ? 30 : range === '1d' ? 1 : 7;
+    const businessAt = now();
+    const jobs = req.app.locals.jobRuntime?.getHealth() ?? { version:'jobs-v1', state:'not_started', enabled:false, running:false, tasks:{} };
 
     const alertRow = await queryOne(
-      'SELECT COUNT(*) AS n FROM alert WHERE created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)',
-      [days]
+      'SELECT COUNT(*) AS n FROM alert WHERE created_at >= DATE_SUB(?, INTERVAL ? DAY)',
+      [businessAt, days]
     );
     const invalidRow = await queryOne(
-      'SELECT COUNT(*) AS n FROM disposition WHERE is_invalid_check = 1 AND created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)',
-      [days]
+      'SELECT COUNT(*) AS n FROM disposition WHERE is_invalid_check = 1 AND created_at >= DATE_SUB(?, INTERVAL ? DAY)',
+      [businessAt, days]
     );
     const ackRow = await queryOne(
-      'SELECT COUNT(*) AS total, SUM(ack_at IS NOT NULL) AS acked FROM notification WHERE sent_at >= DATE_SUB(NOW(), INTERVAL ? DAY)',
-      [days]
+      'SELECT COUNT(*) AS total, SUM(ack_at IS NOT NULL) AS acked FROM notification WHERE sent_at >= DATE_SUB(?, INTERVAL ? DAY)',
+      [businessAt, days]
     );
     const avgRow = await queryOne(
-      'SELECT AVG(duration_min) AS avgMin FROM disposition WHERE duration_min IS NOT NULL AND created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)',
-      [days]
+      'SELECT AVG(duration_min) AS avgMin FROM disposition WHERE duration_min IS NOT NULL AND created_at >= DATE_SUB(?, INTERVAL ? DAY)',
+      [businessAt, days]
     );
     const pendingRow = await queryOne("SELECT COUNT(*) AS n FROM verify_order WHERE status <> 'closed'");
-    const overdueRow = await queryOne("SELECT COUNT(*) AS n FROM verify_order WHERE status <> 'closed' AND sla_deadline < NOW()");
+    const overdueRow = await queryOne("SELECT COUNT(*) AS n FROM verify_order WHERE status <> 'closed' AND sla_deadline < ?", [businessAt]);
     const unreadRow = await queryOne('SELECT COUNT(*) AS n FROM notification WHERE ack_at IS NULL');
 
     const totalNoti = Number(ackRow.total || 0);
@@ -85,7 +90,9 @@ router.get('/overview', async (req, res, next) => {
       pendingCount: Number(pendingRow.n || 0),
       overdueCount: Number(overdueRow.n || 0),
       unreadCount: Number(unreadRow.n || 0),
-      lastJobAt: null,
+      lastJobAt: jobs.tasks.T2?.lastSucceededAt ?? null,
+      jobs,
+      routingTodos: await listRoutingTodos(req.user.personId),
       range,
     });
   } catch (e) {
@@ -324,13 +331,22 @@ router.get('/params', async (req, res, next) => {
 // ---------------- M8 PUT /admin/params ----------------
 router.put('/params', async (req, res, next) => {
   try {
+    await transaction(conn => actor(conn, req.user.personId, ['admin']));
     const entries = Object.entries(req.body || {});
     if (!entries.length) return fail(res, 422, '没有要更新的参数');
 
     const rejected = entries.filter(([k]) => !WRITABLE_KEYS.includes(k)).map(([k]) => k);
     if (rejected.length) return fail(res, 422, `不允许修改的参数: ${rejected.join(', ')}`);
 
+    if(entries.some(([,v])=>String(v).length>255))return fail(res,422,'参数值过长');
+    if(Object.hasOwn(req.body,'day_cut_hour')){
+      const raw=req.body.day_cut_hour,value=Number(raw);if(!['number','string'].includes(typeof raw)||String(raw).trim()===''||!Number.isInteger(value)||value<0||value>23)return fail(res,422,'day_cut_hour 不合法');
+    }
+    if(Object.hasOwn(req.body,'time_scale'))await changeScale(req.user.personId,Number(req.body.time_scale),{ownerId:req.app.locals.jobRuntime?.ownerId()??null});
+    if(Object.hasOwn(req.body,'day_cut_hour'))await changeDayCut(req.user.personId,req.body.day_cut_hour,{ownerId:req.app.locals.jobRuntime?.ownerId()??null,onChanged:hour=>req.app.locals.jobRuntime?.updateScheduleFrom({day_cut_hour:hour})});
+
     for (const [k, v] of entries) {
+      if(k==='time_scale'||k==='day_cut_hour')continue;
       await execute(
         `INSERT INTO param (community_id, k, v) VALUES (1, ?, ?)
          ON DUPLICATE KEY UPDATE v = VALUES(v)`,

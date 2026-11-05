@@ -6,7 +6,14 @@
   "main": "src/index.js",
   "scripts": {
     "dev": "node --watch src/index.js",
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "test": "node --test --test-concurrency=1 test/signal-day.test.js test/l2.test.js test/l3.test.js test/l4.test.js test/job-schedule.test.js test/job-scheduler.test.js test/business-clock.test.js test/job-config.test.js",
+    "test:integration": "node --test --test-concurrency=1 test/l1.integration.test.js test/l2.integration.test.js test/l3.integration.test.js test/l4.integration.test.js test/job-runtime.integration.test.js test/job-server.integration.test.js",
+    "job:day-cut": "node src/jobs/day-cut.js",
+    "job:baseline": "node src/jobs/baseline.js",
+    "job:stratification": "node src/jobs/stratification.js",
+    "job:routing": "node src/jobs/routing.js",
+    "job:sla": "node src/jobs/sla.js"
   },
   "engines": {
     "node": ">=20"
